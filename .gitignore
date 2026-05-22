@@ -1,0 +1,26 @@
+# Build outputs
+backend/build/
+frontend/dist/
+
+# Dependencies and caches
+frontend/node_modules/
+backend/scripts/__pycache__/
+__pycache__/
+*.pyc
+
+# Runtime and local artifacts
+backend/build/judge_tmp/
+*.log
+*.tmp
+*.local
+
+# Editor and OS files
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Local environment files
+.env
+.env.*
+!.env.example
