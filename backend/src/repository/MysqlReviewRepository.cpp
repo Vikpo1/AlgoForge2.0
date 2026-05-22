@@ -706,6 +706,38 @@ bool MysqlReviewRepository::deleteProblemList(int listId) {
 #endif
 }
 
+bool MysqlReviewRepository::removeProblemFromList(int listId, int problemId) {
+#ifndef ALGOFORGE_USE_MYSQL
+    return false;
+#else
+    MysqlConnection connection;
+    if (!connection.ok()) {
+        return false;
+    }
+
+    std::ostringstream deleteItemSql;
+    deleteItemSql
+        << "DELETE pli FROM problem_list_items pli "
+        << "JOIN problem_lists pl ON pl.id = pli.list_id "
+        << "WHERE pli.list_id = " << listId
+        << " AND pli.problem_id = " << problemId
+        << " AND pl.user_id = " << kDefaultUserId;
+
+    if (!executeSql(connection.get(), deleteItemSql.str()) || mysql_affected_rows(connection.get()) <= 0) {
+        return false;
+    }
+
+    executeSql(
+        connection.get(),
+        "DELETE FROM problems WHERE id = " + std::to_string(problemId) +
+            " AND NOT EXISTS (SELECT 1 FROM problem_list_items WHERE problem_id = " +
+            std::to_string(problemId) + ")"
+    );
+
+    return true;
+#endif
+}
+
 std::vector<domain::ReviewCandidate> MysqlReviewRepository::listCandidates() {
 #ifndef ALGOFORGE_USE_MYSQL
     return {};

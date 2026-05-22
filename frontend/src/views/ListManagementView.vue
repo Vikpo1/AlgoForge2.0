@@ -87,7 +87,7 @@
       <div class="panel-header compact">
         <div>
           <h2>{{ selectedList ? selectedList.name : '题单内题目' }}</h2>
-          <p>选择上方题单后，可修改其中每道题的用户权值。</p>
+          <p>选择上方题单后，可修改其中每道题的用户权值，也可以从当前题单移除单题。</p>
         </div>
       </div>
 
@@ -117,6 +117,14 @@
             />
           </template>
         </el-table-column>
+
+        <el-table-column label="操作" width="110">
+          <template #default="{ row }">
+            <el-button size="small" type="danger" plain @click="removeProblem(row)">
+              删除
+            </el-button>
+          </template>
+        </el-table-column>
       </el-table>
     </section>
   </main>
@@ -127,6 +135,7 @@ import { onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   createProblemList,
+  deleteProblemFromList,
   deleteProblemList,
   getProblemLists,
   getProblemsInList,
@@ -162,20 +171,24 @@ const loadLists = async () => {
   }
 }
 
-const selectList = async (row) => {
-  selectedList.value = row
-  problems.value = []
-
-  if (!row) {
+const loadProblemsForSelectedList = async () => {
+  if (!selectedList.value) {
+    problems.value = []
     return
   }
 
   try {
-    const response = await getProblemsInList(row.id)
+    const response = await getProblemsInList(selectedList.value.id)
     problems.value = response.data.data.problems || []
   } catch (error) {
     ElMessage.error('题单内题目加载失败')
   }
+}
+
+const selectList = async (row) => {
+  selectedList.value = row
+  problems.value = []
+  await loadProblemsForSelectedList()
 }
 
 const createList = async () => {
@@ -244,6 +257,32 @@ const removeList = async (row) => {
   } catch (error) {
     if (error !== 'cancel') {
       ElMessage.error('删除题单失败')
+    }
+  }
+}
+
+const removeProblem = async (row) => {
+  if (!selectedList.value) {
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      `从「${selectedList.value.name}」中删除「${row.problem.title}」？如果该题不属于其他题单，相关复习记录也会一并删除。`,
+      '删除题目',
+      { type: 'warning' }
+    )
+
+    await deleteProblemFromList(selectedList.value.id, row.problem.id)
+    window.clearTimeout(problemSaveTimers.get(row.problem.id))
+    problemSaveTimers.delete(row.problem.id)
+    problems.value = problems.value.filter(item => item.problem.id !== row.problem.id)
+    await loadLists()
+    await loadProblemsForSelectedList()
+    ElMessage.success('题目已删除')
+  } catch (error) {
+    if (error !== 'cancel') {
+      ElMessage.error('删除题目失败')
     }
   }
 }

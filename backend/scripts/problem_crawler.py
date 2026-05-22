@@ -116,8 +116,15 @@ def text_or_empty(node):
 def plain_inline(node):
     if node is None:
         return ""
-    text = node.get_text(" ", strip=True)
-    return normalize_space(text)
+    return normalize_space(node.get_text(" ", strip=True))
+
+
+def pre_text(pre):
+    if not pre:
+        return ""
+    text = pre.get_text("\n", strip=False).replace("\r\n", "\n").replace("\r", "\n")
+    text = re.sub(r"\n{2,}", "\n", text)
+    return text.strip("\n")
 
 
 def tag_to_markdown(node):
@@ -133,9 +140,7 @@ def tag_to_markdown(node):
     if name == "br":
         return "\n"
     if name == "pre":
-        code = node.get_text("\n", strip=False).replace("\r\n", "\n").replace("\r", "\n")
-        code = re.sub(r"\n{2,}", "\n", code).strip("\n")
-        return f"\n\n```\n{code}\n```\n\n"
+        return f"\n\n```\n{pre_text(node)}\n```\n\n"
     if name == "code":
         return f"`{node.get_text('', strip=False)}`"
     if name in {"h1", "h2", "h3", "h4"}:
@@ -165,16 +170,23 @@ def tag_to_markdown(node):
     return inner
 
 
+def clean_markdown(markdown):
+    markdown = (markdown or "").replace("$$$", "$")
+    markdown = re.sub(r"\n{3,}", "\n\n", markdown)
+    markdown = re.sub(r"[ \t]+\n", "\n", markdown)
+    return markdown.strip()
+
+
 def html_to_markdown(node):
     if node is None:
         return ""
     for removable in node.find_all(["script", "style"]):
         removable.decompose()
-    markdown = "".join(tag_to_markdown(child) for child in node.children)
-    markdown = markdown.replace("$$$", "$")
-    markdown = re.sub(r"\n{3,}", "\n\n", markdown)
-    markdown = re.sub(r"[ \t]+\n", "\n", markdown)
-    return markdown.strip()
+    return clean_markdown("".join(tag_to_markdown(child) for child in node.children))
+
+
+def markdown_for_node(node):
+    return clean_markdown(tag_to_markdown(node))
 
 
 def section_markdown_after_heading(root, headings):
@@ -192,6 +204,89 @@ def section_markdown_after_heading(root, headings):
             parts.append(tag_to_markdown(sibling))
         return normalize_space("".join(parts))
     return ""
+
+
+def codeforces_header_property(header, class_name):
+    if not header:
+        return ""
+
+    source = header.find("div", class_=class_name)
+    if not source:
+        return ""
+
+    clone = BeautifulSoup(str(source), "html.parser").find("div")
+    title_node = clone.find("div", class_="property-title") if clone else None
+    title = text_or_empty(title_node)
+    if title_node:
+        title_node.decompose()
+
+    value = text_or_empty(clone)
+    if title and value:
+        return f"{title}: {value}"
+    return text_or_empty(source)
+
+
+def atcoder_limit_lines(soup):
+    text_sources = []
+    title_area = soup.select_one("div#main-div") or soup.select_one("div.container")
+    task_statement = soup.find("div", id="task-statement")
+    if title_area:
+        text_sources.append(title_area)
+    if task_statement:
+        text_sources.append(task_statement)
+    text_sources.append(soup)
+
+    for source in text_sources:
+        text = normalize_space(source.get_text("\n", strip=True))
+        match = re.search(
+            r"Time\s*Limit\s*:\s*([^/\n]+?)\s*(?:/|\n)\s*Memory\s*Limit\s*:\s*([^\n]+)",
+            text,
+            re.IGNORECASE,
+        )
+        if match:
+            return [
+                f"Time Limit: {normalize_space(match.group(1))}",
+                f"Memory Limit: {normalize_space(match.group(2))}",
+            ]
+
+    return []
+
+
+def codeforces_section_markdown(block, fallback_title):
+    clone = BeautifulSoup(str(block), "html.parser").find()
+    title_node = clone.find("div", class_="title") if clone else None
+    title = text_or_empty(title_node) or fallback_title
+    if title_node:
+        title_node.decompose()
+
+    body = html_to_markdown(clone)
+    if title:
+        body = re.sub(rf"^{re.escape(title)}\s*", "", body).strip()
+    return f"## {title}\n\n{body}".strip()
+
+
+def codeforces_samples_markdown(block):
+    section_title = text_or_empty(block.find("div", class_="section-title")) or "Example"
+    sample_tests = block.find_all("div", class_="sample-test", recursive=False)
+    if not sample_tests:
+        sample_tests = [block]
+
+    parts = [f"## {section_title}"]
+    for index, sample in enumerate(sample_tests, start=1):
+        if len(sample_tests) > 1:
+            parts.append(f"### Example {index}")
+
+        for sample_part in sample.find_all(
+            "div",
+            class_=lambda value: value and ("input" in value.split() or "output" in value.split()),
+            recursive=False,
+        ):
+            title = text_or_empty(sample_part.find("div", class_="title")) or "Sample"
+            code = pre_text(sample_part.find("pre"))
+            if code:
+                parts.append(f"### {title}\n\n```\n{code}\n```")
+
+    return "\n\n".join(parts).strip()
 
 
 def scrape_codeforces(url):
@@ -212,19 +307,49 @@ def scrape_codeforces(url):
         title = soup.title.get_text(strip=True).replace(" - Codeforces", "").strip()
 
     header = statement.find("div", class_="header")
-    if header:
-        header.decompose()
+    time_limit = codeforces_header_property(header, "time-limit")
+    memory_limit = codeforces_header_property(header, "memory-limit")
 
     input_block = statement.find("div", class_="input-specification")
     output_block = statement.find("div", class_="output-specification")
     samples = statement.find_all("pre")
     tags = [tag.get_text(strip=True) for tag in soup.find_all("span", class_="tag-box")]
 
+    parts = []
+    for child in statement.children:
+        if isinstance(child, NavigableString):
+            if child.strip():
+                parts.append(child.strip())
+            continue
+
+        classes = child.get("class") or []
+        if "header" in classes:
+            continue
+        if "input-specification" in classes:
+            parts.append(codeforces_section_markdown(child, "Input"))
+            continue
+        if "output-specification" in classes:
+            parts.append(codeforces_section_markdown(child, "Output"))
+            continue
+        if "sample-tests" in classes:
+            parts.append(codeforces_samples_markdown(child))
+            continue
+
+        text = markdown_for_node(child)
+        if text:
+            parts.append(text)
+
+    limits = "\n".join(item for item in [time_limit, memory_limit] if item)
+    content = ""
+    if limits:
+        content += f"ALGOFORGE_CF_LIMITS\n{limits}\nALGOFORGE_CF_BODY\n\n"
+    content += "\n\n".join(part for part in parts if part).strip()
+
     return ok(
         url,
         title or "Codeforces Problem",
         "Codeforces",
-        "## 题面\n\n" + html_to_markdown(statement),
+        content,
         "markdown",
         tags or ["Codeforces"],
         input_description=text_or_empty(input_block),
@@ -265,11 +390,16 @@ def scrape_atcoder(url):
         sample_input = text_or_empty(samples[0])
         sample_output = text_or_empty(samples[1])
 
+    content = html_to_markdown(statement)
+    limits = "\n".join(atcoder_limit_lines(soup))
+    if limits:
+        content = f"ALGOFORGE_ATCODER_LIMITS\n{limits}\nALGOFORGE_ATCODER_BODY\n\n{content}"
+
     return ok(
         url,
         title,
         "AtCoder",
-        "## 题面\n\n" + html_to_markdown(statement),
+        content,
         "markdown",
         ["AtCoder"],
         input_description=section_markdown_after_heading(statement, ["Input", "入力"]),

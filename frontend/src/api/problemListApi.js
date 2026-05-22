@@ -19,3 +19,7 @@ export const deleteProblemList = (listId) => {
 export const getProblemsInList = (listId) => {
   return http.get(`/api/problem-lists/${listId}/problems`)
 }
+
+export const deleteProblemFromList = (listId, problemId) => {
+  return http.delete(`/api/problem-lists/${listId}/problems/${problemId}`)
+}

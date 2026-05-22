@@ -58,6 +58,12 @@ bool ReviewRepository::deleteProblemList(int listId) {
         : MockReviewRepository::deleteProblemList(listId);
 }
 
+bool ReviewRepository::removeProblemFromList(int listId, int problemId) {
+    return useMysql()
+        ? MysqlReviewRepository::removeProblemFromList(listId, problemId)
+        : MockReviewRepository::removeProblemFromList(listId, problemId);
+}
+
 std::vector<domain::ReviewCandidate> ReviewRepository::listCandidates() {
     return useMysql()
         ? MysqlReviewRepository::listCandidates()

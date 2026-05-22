@@ -36,6 +36,7 @@ public:
         const std::optional<int>& listUserWeight
     );
     static bool deleteProblemList(int listId);
+    static bool removeProblemFromList(int listId, int problemId);
 
     static std::vector<domain::ReviewCandidate> listCandidates();
     static std::vector<domain::ReviewCandidate> listCandidatesByListId(int listId);

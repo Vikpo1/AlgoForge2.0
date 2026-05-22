@@ -1,12 +1,17 @@
 <template>
-  <section class="problem-section">
+  <section class="problem-section" :class="{ 'contest-problem': isContestStyledProblem }">
     <div class="problem-title-row">
       <div>
         <h2>{{ problem.title }}</h2>
-        <div class="problem-meta">{{ problem.oj }} · {{ problem.difficulty }}</div>
+        <div v-if="!isContestStyledProblem" class="problem-meta">
+          {{ problem.oj }} · {{ problem.difficulty }}
+        </div>
+        <div v-else-if="contestLimits.length" class="contest-limits">
+          <div v-for="limit in contestLimits" :key="limit">{{ limit }}</div>
+        </div>
       </div>
 
-      <el-tag type="info" effect="plain">
+      <el-tag v-if="!isContestStyledProblem" type="info" effect="plain">
         {{ problem.oj }}
       </el-tag>
     </div>
@@ -18,11 +23,13 @@
       <span v-if="!problem.tags?.length" class="muted">暂无标签</span>
     </div>
 
-    <div class="statement">
+    <div class="statement" :class="{ 'statement-contest': isContestStyledProblem }">
       <div v-if="qojStatementUrl" class="qoj-statement">
         <div>
           <strong>QOJ PDF 题面</strong>
-          <span>QOJ 的样例、输入格式和输出格式通常都在 PDF 中。为避免页面自动下载，这里只提供打开入口。</span>
+          <span>
+            QOJ 的样例、输入格式和输出格式通常都在 PDF 中。为避免页面自动下载，这里只提供打开入口。
+          </span>
         </div>
         <el-button type="primary" plain size="small" @click="openQojStatement">
           打开题面
@@ -32,27 +39,29 @@
       <MarkdownViewer :content="visibleStatementMarkdown" />
     </div>
 
-    <el-descriptions :column="1" border>
-      <el-descriptions-item label="输入格式">
-        {{ problem.inputDescription || '-' }}
-      </el-descriptions-item>
+    <template v-if="!isContestStyledProblem">
+      <el-descriptions :column="1" border>
+        <el-descriptions-item label="输入格式">
+          {{ problem.inputDescription || '-' }}
+        </el-descriptions-item>
 
-      <el-descriptions-item label="输出格式">
-        {{ problem.outputDescription || '-' }}
-      </el-descriptions-item>
-    </el-descriptions>
+        <el-descriptions-item label="输出格式">
+          {{ problem.outputDescription || '-' }}
+        </el-descriptions-item>
+      </el-descriptions>
 
-    <div class="samples">
-      <div class="sample-block">
-        <div class="sample-title">样例输入</div>
-        <pre>{{ problem.sampleInput || '-' }}</pre>
+      <div class="samples">
+        <div class="sample-block">
+          <div class="sample-title">样例输入</div>
+          <pre>{{ problem.sampleInput || '-' }}</pre>
+        </div>
+
+        <div class="sample-block">
+          <div class="sample-title">样例输出</div>
+          <pre>{{ problem.sampleOutput || '-' }}</pre>
+        </div>
       </div>
-
-      <div class="sample-block">
-        <div class="sample-title">样例输出</div>
-        <pre>{{ problem.sampleOutput || '-' }}</pre>
-      </div>
-    </div>
+    </template>
 
     <div class="actions">
       <el-button type="primary" plain @click="$emit('toggle-tags')">
@@ -110,6 +119,7 @@ const props = defineProps({
 
 defineEmits(['finish-thinking', 'toggle-debug', 'toggle-tags'])
 
+const isContestStyledProblem = computed(() => ['Codeforces', 'AtCoder'].includes(props.problem?.oj))
 const statementText = computed(() => props.problem?.statementMarkdown || '暂无题面。')
 
 const qojStatementUrl = computed(() => {
@@ -117,10 +127,30 @@ const qojStatementUrl = computed(() => {
   return match ? match[1] : ''
 })
 
+const contestLimits = computed(() => {
+  const match = statementText.value.match(
+    /^ALGOFORGE_(?:CF|ATCODER)_LIMITS\s*\n([\s\S]*?)\nALGOFORGE_(?:CF|ATCODER)_BODY/m
+  )
+  if (!match) {
+    return []
+  }
+  return match[1]
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+})
+
 const visibleStatementMarkdown = computed(() => {
-  return statementText.value
+  let markdown = statementText.value
     .replace(/^ALGOFORGE_(?:QOJ|PDF)_STATEMENT:\s*\S+\s*/m, '')
+    .replace(/^ALGOFORGE_(?:CF|ATCODER)_LIMITS\s*\n[\s\S]*?\nALGOFORGE_(?:CF|ATCODER)_BODY\s*/m, '')
     .trim()
+
+  if (isContestStyledProblem.value) {
+    markdown = markdown.replace(/^##\s*题面\s*/m, '').trim()
+  }
+
+  return markdown
 })
 
 const openQojStatement = () => {
@@ -164,6 +194,31 @@ const openOriginalProblem = () => {
   color: #606266;
 }
 
+.contest-problem {
+  max-width: 1040px;
+  margin: 0 auto;
+  padding: 30px 42px;
+  border-color: #d7d7d7;
+}
+
+.contest-problem .problem-title-row {
+  justify-content: center;
+  text-align: center;
+  margin-bottom: 36px;
+}
+
+.contest-problem .problem-title-row h2 {
+  font-size: 26px;
+  font-weight: 500;
+}
+
+.contest-limits {
+  margin-top: 8px;
+  color: #000000;
+  font-size: 15px;
+  line-height: 1.6;
+}
+
 .tag-row {
   display: flex;
   flex-wrap: wrap;
@@ -177,6 +232,64 @@ const openOriginalProblem = () => {
 
 .statement {
   margin: 18px 0 22px;
+}
+
+.statement-contest {
+  max-width: 960px;
+  margin: 0 auto 24px;
+}
+
+.statement-contest :deep(.markdown-viewer) {
+  color: #000000;
+  font-size: 16px;
+  line-height: 1.55;
+}
+
+.statement-contest :deep(.markdown-viewer p) {
+  margin: 0 0 18px;
+}
+
+.statement-contest :deep(.markdown-viewer h2) {
+  margin: 28px 0 12px;
+  color: #000000;
+  font-size: 20px;
+  font-weight: 700;
+  line-height: 1.3;
+}
+
+.statement-contest :deep(.markdown-viewer h3) {
+  margin: 14px 0 8px;
+  color: #000000;
+  font-size: 16px;
+  font-weight: 700;
+}
+
+.statement-contest :deep(.markdown-viewer ul),
+.statement-contest :deep(.markdown-viewer ol) {
+  margin: 12px 0 16px;
+  padding-left: 28px;
+}
+
+.statement-contest :deep(.markdown-viewer li) {
+  margin: 4px 0;
+}
+
+.statement-contest :deep(.markdown-viewer pre) {
+  margin: 8px 0 16px;
+  padding: 12px 14px;
+  border: 1px solid #cfcfcf;
+  border-radius: 0;
+  background: #f7f7f7;
+  color: #000000;
+  font-family: 'Courier New', Courier, monospace;
+  font-size: 15px;
+  line-height: 1.4;
+}
+
+.statement-contest :deep(.markdown-viewer code) {
+  padding: 0;
+  background: transparent;
+  color: inherit;
 }
 
 .qoj-statement {
@@ -248,6 +361,10 @@ pre {
   .problem-title-row,
   .qoj-statement {
     flex-direction: column;
+  }
+
+  .contest-problem {
+    padding: 24px 18px;
   }
 
   .samples {

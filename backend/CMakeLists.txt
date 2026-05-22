@@ -27,6 +27,10 @@ set(THREADS_PREFER_PTHREAD_FLAG ON)
 find_package(Threads REQUIRED)
 target_link_libraries(${PROJECT_NAME} PRIVATE Threads::Threads)
 
+if(WIN32)
+    target_link_libraries(${PROJECT_NAME} PRIVATE ws2_32 wsock32)
+endif()
+
 find_package(OpenSSL QUIET)
 if(OpenSSL_FOUND)
     target_compile_definitions(${PROJECT_NAME} PRIVATE CPPHTTPLIB_OPENSSL_SUPPORT)

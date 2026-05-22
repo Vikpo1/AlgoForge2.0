@@ -342,6 +342,27 @@ void registerRoutes(httplib::Server& server) {
         writeJson(res, successResponse({{"problems", problems}}));
     });
 
+    server.Delete(R"(/api/problem-lists/(\d+)/problems/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
+        setCorsHeaders(res);
+
+        auto listId = parseInt(req.matches[1]);
+        auto problemId = parseInt(req.matches[2]);
+        if (!listId.has_value() || !problemId.has_value()) {
+            writeJson(res, errorResponse(400, "Invalid list id or problem id"), 400);
+            return;
+        }
+
+        if (!algoforge::repository::ReviewRepository::removeProblemFromList(listId.value(), problemId.value())) {
+            writeJson(res, errorResponse(404, "Problem list item not found"), 404);
+            return;
+        }
+
+        writeJson(res, successResponse({
+            {"deletedListId", listId.value()},
+            {"deletedProblemId", problemId.value()}
+        }));
+    });
+
     server.Post("/api/problems/import", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
 

@@ -1,5 +1,6 @@
 # Build outputs
 backend/build/
+backend/build-win/
 frontend/dist/
 
 # Dependencies and caches

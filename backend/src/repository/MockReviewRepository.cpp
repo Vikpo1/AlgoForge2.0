@@ -268,6 +268,36 @@ bool MockReviewRepository::deleteProblemList(int listId) {
     return true;
 }
 
+bool MockReviewRepository::removeProblemFromList(int listId, int problemId) {
+    auto& data = store();
+    auto listIndex = findListIndex(listId);
+    if (!listIndex.has_value()) {
+        return false;
+    }
+
+    const auto& problemIds = data.problemLists[listIndex.value()].getProblemIds();
+    if (std::find(problemIds.begin(), problemIds.end(), problemId) == problemIds.end()) {
+        return false;
+    }
+
+    data.problemLists[listIndex.value()].removeProblemId(problemId);
+    data.candidates.erase(
+        std::remove_if(data.candidates.begin(), data.candidates.end(), [listId, problemId](const domain::ReviewCandidate& candidate) {
+            return candidate.getListId() == listId && candidate.getProblem().getId() == problemId;
+        }),
+        data.candidates.end()
+    );
+
+    const bool stillUsed = std::any_of(data.candidates.begin(), data.candidates.end(), [problemId](const domain::ReviewCandidate& candidate) {
+        return candidate.getProblem().getId() == problemId;
+    });
+    if (!stillUsed) {
+        data.notes.erase(problemId);
+    }
+
+    return true;
+}
+
 std::vector<domain::ReviewCandidate> MockReviewRepository::listCandidates() {
     return store().candidates;
 }
