@@ -12,9 +12,12 @@
 #include "service/ReviewScheduler.h"
 
 #include <functional>
+#include <mutex>
 #include <optional>
 #include <random>
+#include <sstream>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 using json = nlohmann::json;
@@ -102,12 +105,78 @@ json noteToJson(const algoforge::domain::Note& material) {
     };
 }
 
+json userToJson(const algoforge::repository::AuthUser& user) {
+    return {
+        {"id", user.id},
+        {"username", user.username},
+        {"email", user.email}
+    };
+}
+
+json dailyActivityToJson(const algoforge::repository::DailyActivity& item) {
+    return {
+        {"date", item.date},
+        {"count", item.count}
+    };
+}
+
 std::optional<int> parseInt(const std::string& text) {
     try {
         return std::stoi(text);
     } catch (const std::exception&) {
         return std::nullopt;
     }
+}
+
+void writeJson(httplib::Response& res, const json& payload, int status = 200);
+
+std::mutex gTokenMutex;
+std::unordered_map<std::string, int> gTokenUserIds;
+
+std::string createToken(int userId) {
+    static thread_local std::mt19937_64 generator(std::random_device{}());
+    std::uniform_int_distribution<unsigned long long> distribution;
+
+    std::ostringstream token;
+    token << userId << "-";
+    token << std::hex << distribution(generator) << distribution(generator);
+
+    std::lock_guard<std::mutex> lock(gTokenMutex);
+    gTokenUserIds[token.str()] = userId;
+    return token.str();
+}
+
+std::optional<int> userIdFromToken(const std::string& token) {
+    std::lock_guard<std::mutex> lock(gTokenMutex);
+    auto it = gTokenUserIds.find(token);
+    if (it == gTokenUserIds.end()) {
+        return std::nullopt;
+    }
+    return it->second;
+}
+
+std::string bearerToken(const httplib::Request& req) {
+    if (!req.has_header("Authorization")) {
+        return "";
+    }
+
+    const std::string header = req.get_header_value("Authorization");
+    const std::string prefix = "Bearer ";
+    if (header.rfind(prefix, 0) != 0) {
+        return "";
+    }
+    return header.substr(prefix.size());
+}
+
+bool requireAuth(const httplib::Request& req, httplib::Response& res) {
+    auto userId = userIdFromToken(bearerToken(req));
+    if (!userId.has_value()) {
+        writeJson(res, errorResponse(401, "Login required"), 401);
+        return false;
+    }
+
+    algoforge::repository::MysqlReviewRepository::setCurrentUserId(userId.value());
+    return true;
 }
 
 std::optional<algoforge::domain::ReviewFeedback> parseReviewFeedback(
@@ -186,7 +255,7 @@ std::optional<algoforge::domain::ReviewCandidate> selectRandomCandidate(
     return available[distribution(generator)];
 }
 
-void writeJson(httplib::Response& res, const json& payload, int status = 200) {
+void writeJson(httplib::Response& res, const json& payload, int status) {
     res.status = status;
     res.set_content(payload.dump(4), "application/json");
 }
@@ -222,8 +291,81 @@ void registerRoutes(httplib::Server& server) {
         }));
     });
 
-    server.Get("/api/problem-lists", [](const httplib::Request&, httplib::Response& res) {
+    server.Post("/api/auth/register", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+
+        json body;
+        try {
+            body = json::parse(req.body);
+        } catch (const std::exception&) {
+            writeJson(res, errorResponse(400, "Invalid JSON body"), 400);
+            return;
+        }
+
+        const std::string username = body.value("username", "");
+        const std::string password = body.value("password", "");
+        const std::string email = body.value("email", "");
+        if (username.size() < 3 || password.size() < 4) {
+            writeJson(res, errorResponse(400, "Username must be at least 3 chars and password at least 4 chars"), 400);
+            return;
+        }
+
+        auto user = algoforge::repository::MysqlReviewRepository::createUser(username, password, email);
+        if (!user.has_value()) {
+            writeJson(res, errorResponse(409, "User already exists or database is unavailable"), 409);
+            return;
+        }
+
+        const std::string token = createToken(user->id);
+        writeJson(res, successResponse({{"token", token}, {"user", userToJson(user.value())}}));
+    });
+
+    server.Post("/api/auth/login", [](const httplib::Request& req, httplib::Response& res) {
+        setCorsHeaders(res);
+
+        json body;
+        try {
+            body = json::parse(req.body);
+        } catch (const std::exception&) {
+            writeJson(res, errorResponse(400, "Invalid JSON body"), 400);
+            return;
+        }
+
+        auto user = algoforge::repository::MysqlReviewRepository::authenticateUser(
+            body.value("username", ""),
+            body.value("password", "")
+        );
+        if (!user.has_value()) {
+            writeJson(res, errorResponse(401, "Invalid username or password"), 401);
+            return;
+        }
+
+        const std::string token = createToken(user->id);
+        writeJson(res, successResponse({{"token", token}, {"user", userToJson(user.value())}}));
+    });
+
+    server.Get("/api/auth/me", [](const httplib::Request& req, httplib::Response& res) {
+        setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
+
+        auto user = algoforge::repository::MysqlReviewRepository::findUserById(
+            algoforge::repository::MysqlReviewRepository::currentUserId()
+        );
+        if (!user.has_value()) {
+            writeJson(res, errorResponse(404, "User not found"), 404);
+            return;
+        }
+
+        writeJson(res, successResponse({{"user", userToJson(user.value())}}));
+    });
+
+    server.Get("/api/problem-lists", [](const httplib::Request& req, httplib::Response& res) {
+        setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         json lists = json::array();
         for (const auto& list : algoforge::repository::ReviewRepository::listProblemLists()) {
@@ -235,6 +377,9 @@ void registerRoutes(httplib::Server& server) {
 
     server.Post("/api/problem-lists", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         json body;
         try {
@@ -264,6 +409,9 @@ void registerRoutes(httplib::Server& server) {
 
     server.Patch(R"(/api/problem-lists/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         auto listId = parseInt(req.matches[1]);
         if (!listId.has_value()) {
@@ -310,6 +458,9 @@ void registerRoutes(httplib::Server& server) {
 
     server.Delete(R"(/api/problem-lists/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         auto listId = parseInt(req.matches[1]);
         if (!listId.has_value()) {
@@ -327,6 +478,9 @@ void registerRoutes(httplib::Server& server) {
 
     server.Get(R"(/api/problem-lists/(\d+)/problems)", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         auto listId = parseInt(req.matches[1]);
         if (!listId.has_value()) {
@@ -344,6 +498,9 @@ void registerRoutes(httplib::Server& server) {
 
     server.Delete(R"(/api/problem-lists/(\d+)/problems/(\d+))", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         auto listId = parseInt(req.matches[1]);
         auto problemId = parseInt(req.matches[2]);
@@ -365,6 +522,9 @@ void registerRoutes(httplib::Server& server) {
 
     server.Post("/api/problems/import", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         json body;
         try {
@@ -398,6 +558,9 @@ void registerRoutes(httplib::Server& server) {
 
     server.Patch(R"(/api/problems/(\d+)/weight)", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         auto problemId = parseInt(req.matches[1]);
         if (!problemId.has_value()) {
@@ -425,6 +588,9 @@ void registerRoutes(httplib::Server& server) {
 
     server.Get(R"(/api/problems/(\d+)/detail)", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         auto problemId = parseInt(req.matches[1]);
         if (!problemId.has_value()) {
@@ -443,6 +609,9 @@ void registerRoutes(httplib::Server& server) {
 
     server.Get("/api/review/next", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         using algoforge::repository::ReviewRepository;
         using algoforge::service::ReviewScheduler;
@@ -485,8 +654,11 @@ void registerRoutes(httplib::Server& server) {
         writeJson(res, successResponse(candidateToJson(selected.value())));
     });
 
-    server.Get("/api/dev/next-review", [](const httplib::Request&, httplib::Response& res) {
+    server.Get("/api/dev/next-review", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         using algoforge::repository::ReviewRepository;
         using algoforge::service::ReviewScheduler;
@@ -502,8 +674,44 @@ void registerRoutes(httplib::Server& server) {
         writeJson(res, successResponse(candidateToJson(selected.value())));
     });
 
+    server.Get("/api/stats/daily-activity", [](const httplib::Request& req, httplib::Response& res) {
+        setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
+
+        int days = 365;
+        if (req.has_param("days")) {
+            days = parseInt(req.get_param_value("days")).value_or(365);
+        }
+        if (days <= 0 || days > 730) {
+            days = 365;
+        }
+
+        json daysJson = json::array();
+        int totalCount = 0;
+        int activeDays = 0;
+        for (const auto& item : algoforge::repository::MysqlReviewRepository::dailyActivity(days)) {
+            daysJson.push_back(dailyActivityToJson(item));
+            totalCount += item.count;
+            if (item.count > 0) {
+                ++activeDays;
+            }
+        }
+
+        writeJson(res, successResponse({
+            {"days", daysJson},
+            {"rangeDays", days},
+            {"totalCount", totalCount},
+            {"activeDays", activeDays}
+        }));
+    });
+
     server.Get(R"(/api/problems/(\d+)/review-material)", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         auto problemId = parseInt(req.matches[1]);
         if (!problemId.has_value()) {
@@ -533,6 +741,9 @@ void registerRoutes(httplib::Server& server) {
 
     server.Patch(R"(/api/problems/(\d+)/review-material)", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         auto problemId = parseInt(req.matches[1]);
         if (!problemId.has_value()) {
@@ -566,6 +777,9 @@ void registerRoutes(httplib::Server& server) {
 
     server.Post(R"(/api/review/(\d+)/feedback)", [](const httplib::Request& req, httplib::Response& res) {
         setCorsHeaders(res);
+        if (!requireAuth(req, res)) {
+            return;
+        }
 
         auto problemId = parseInt(req.matches[1]);
         if (!problemId.has_value()) {
@@ -604,6 +818,13 @@ void registerRoutes(httplib::Server& server) {
         );
 
         algoforge::repository::ReviewRepository::updateReviewState(problemId.value(), updatedState);
+        algoforge::repository::MysqlReviewRepository::recordReviewFeedback(
+            problemId.value(),
+            algoforge::domain::reviewFeedbackToString(feedback.value()),
+            durationSeconds,
+            algoforge::domain::reviewStatusToString(currentState.getStatus()),
+            algoforge::domain::reviewStatusToString(updatedState.getStatus())
+        );
 
         writeJson(res, successResponse({
             {"problemId", problemId.value()},

@@ -1,36 +1,33 @@
 <template>
   <main class="page">
     <section class="panel">
-      <div class="panel-header">
+      <div class="header">
         <div>
           <h1>主菜单</h1>
-          <p>粘贴外部 OJ 题目链接，并把它加入一个已有题单。</p>
+          <p>粘贴外部 OJ 题目链接，并把它加入你的某个题单。</p>
         </div>
-
         <el-button type="primary" plain @click="loadLists">刷新题单</el-button>
       </div>
 
       <el-alert
         v-if="lists.length === 0 && !loading"
-        class="notice"
+        class="empty-alert"
         type="warning"
         show-icon
         title="当前没有可用题单，请先进入题单管理创建题单。"
       />
 
-      <el-form class="import-form" label-position="top">
+      <el-form label-position="top">
         <el-form-item label="题目链接">
           <el-input
             v-model="form.url"
             placeholder="https://codeforces.com/problemset/problem/..."
-            clearable
           />
         </el-form-item>
 
         <el-form-item label="目标题单">
           <el-select
             v-model="form.listId"
-            class="full"
             placeholder="选择要加入的题单"
             :disabled="lists.length === 0"
           >
@@ -48,7 +45,7 @@
             type="primary"
             :loading="submitting"
             :disabled="!form.url || !form.listId"
-            @click="submitImport"
+            @click="submit"
           >
             添加题目
           </el-button>
@@ -58,19 +55,11 @@
         </div>
       </el-form>
 
-      <el-alert
-        v-if="lastImported"
-        class="result"
-        type="success"
-        show-icon
-        :title="`已添加：${lastImported.problem.title}`"
-      />
-
       <el-table v-if="lists.length" class="list-table" :data="lists" border>
         <el-table-column prop="name" label="已有题单" min-width="160" />
-        <el-table-column prop="description" label="描述" min-width="220" />
-        <el-table-column prop="problemCount" label="题目数" width="100" />
+        <el-table-column prop="description" label="描述" min-width="260" />
         <el-table-column prop="listUserWeight" label="题单权值" width="120" />
+        <el-table-column prop="problemCount" label="题目数" width="100" />
       </el-table>
     </section>
   </main>
@@ -82,10 +71,9 @@ import { ElMessage } from 'element-plus'
 import { getProblemLists } from '../api/problemListApi'
 import { importProblem } from '../api/problemApi'
 
+const lists = ref([])
 const loading = ref(false)
 const submitting = ref(false)
-const lists = ref([])
-const lastImported = ref(null)
 
 const form = reactive({
   url: '',
@@ -94,11 +82,9 @@ const form = reactive({
 
 const loadLists = async () => {
   loading.value = true
-
   try {
     const response = await getProblemLists()
     lists.value = response.data.data.lists || []
-
     if (!form.listId && lists.value.length) {
       form.listId = lists.value[0].id
     }
@@ -109,17 +95,13 @@ const loadLists = async () => {
   }
 }
 
-const submitImport = async () => {
+const submit = async () => {
   submitting.value = true
-  lastImported.value = null
-
   try {
-    const response = await importProblem({
-      url: form.url,
+    await importProblem({
+      url: form.url.trim(),
       listId: form.listId
     })
-
-    lastImported.value = response.data.data.candidate
     form.url = ''
     await loadLists()
     ElMessage.success('题目已加入题单')
@@ -135,13 +117,13 @@ onMounted(loadLists)
 
 <style scoped>
 .page {
-  box-sizing: border-box;
   min-height: calc(100vh - 64px);
+  box-sizing: border-box;
   padding: 32px;
 }
 
 .panel {
-  max-width: 960px;
+  max-width: 1100px;
   margin: 0 auto;
   padding: 28px;
   box-sizing: border-box;
@@ -150,12 +132,11 @@ onMounted(loadLists)
   border-radius: 8px;
 }
 
-.panel-header {
+.header {
   display: flex;
-  align-items: flex-start;
   justify-content: space-between;
   gap: 24px;
-  margin-bottom: 24px;
+  margin-bottom: 22px;
 }
 
 h1 {
@@ -168,26 +149,24 @@ p {
   color: #606266;
 }
 
-.notice,
-.result {
-  margin-bottom: 20px;
-}
-
-.import-form {
-  max-width: 720px;
-}
-
-.full {
-  width: 100%;
+.empty-alert {
+  margin-bottom: 18px;
 }
 
 .actions {
   display: flex;
   flex-wrap: wrap;
   gap: 12px;
+  margin-bottom: 24px;
 }
 
 .list-table {
-  margin-top: 28px;
+  margin-top: 8px;
+}
+
+@media (max-width: 760px) {
+  .header {
+    flex-direction: column;
+  }
 }
 </style>

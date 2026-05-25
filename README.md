@@ -42,7 +42,7 @@ AlgoForge 是一个面向算法训练者的智能复习平台，目标不是重�
 - 洛谷优先解析页面中的 `lentille-context` JSON。
 - QOJ 题面通常是 PDF，因此站内不强行解析样例，而是提供原题/PDF 打开入口。
 
-QOJ 的样例、输入格式和输出格式通常都在 PDF 内，因此 AlgoForge 不会自动弹出下载或内嵌触发下载，而是在刷题页提供“打开题面”按钮。
+QOJ 的样例、输入格式和输出格式通常都在 PDF 内，因此 AlgoForge 不会自动弹出下载或直接把整个 QOJ 页面嵌进来，而是尽量识别独立 PDF 链接并提供预览；提交仍然跳转回原题网站完成。
 
 ### 3. 题单管理
 
@@ -128,7 +128,19 @@ AlgoForge 使用“题单权值 + 单题调度权值”的方式进行复习调�
 
 前端支持 Markdown 渲染，并对常见数学公式进行显示处理。
 
-### 8. 原题网站提交
+### 8. 登录、隔离与统计
+
+AlgoForge 现在支持本地账号密码登录，不同账号只看到自己的题单、题目关联、笔记、复习状态和统计信息。
+
+内置一个兼容旧数据的账号：
+
+```text
+local_user / algoforge
+```
+
+每个账号都会有自己的刷题统计页，使用 GitHub 风格热力图展示最近 365 天的完成情况。用户点击任意一个反馈按钮，就会把当天完成题数加 1，同一题同一天只统计一次。
+
+### 9. 原题网站提交
 
 AlgoForge 不在站内判题，也不代替用户向 OJ 提交代码。
 
@@ -174,6 +186,7 @@ AlgoForge 不在站内判题，也不代替用户向 OJ 提交代码。
 主要负责：
 
 - HTTP API 服务
+- 登录认证与用户隔离
 - 题单和题目管理
 - 复习状态机
 - 调度权重计算
@@ -202,7 +215,7 @@ backend/scripts/requirements.txt
 
 主要数据包括：
 
-- 用户
+- 用户账号
 - 题单
 - 题目
 - 题单与题目的关联关系
@@ -210,6 +223,7 @@ backend/scripts/requirements.txt
 - 贴士与笔记
 - 反馈记录
 - 历史判题提交记录表
+- 刷题完成统计记录
 
 数据库 schema 位于：
 
@@ -303,6 +317,25 @@ export ALGOFORGE_DB_NAME=algoforge
 ./build/AlgoArchiveServer
 ```
 
+如果你是在 Windows 上直接运行当前仓库，也可以用一键脚本启动：
+
+```powershell
+.\start-algoforge.ps1
+```
+
+或者双击：
+
+```text
+start-algoforge.bat
+```
+
+脚本会按顺序尝试：
+
+1. 确认 MySQL 服务是否在监听 3306
+2. 启动后端
+3. 启动前端
+4. 打开浏览器
+
 后端默认监听：
 
 ```text
@@ -320,6 +353,9 @@ http://localhost:8080/api/db/health
 
 部分核心接口：
 
+- `POST /api/auth/register`
+- `POST /api/auth/login`
+- `GET /api/auth/me`
 - `GET /api/health`
 - `GET /api/db/health`
 - `GET /api/problem-lists`
@@ -334,14 +370,48 @@ http://localhost:8080/api/db/health
 - `PATCH /api/problems/:id/review-material`
 - `GET /api/review/next`
 - `POST /api/review/:id/feedback`
+- `GET /api/stats/daily-activity`
 
 ## 当前限制
 
-- QOJ 题面通常是 PDF，当前不解析 PDF 内样例，只提供原题打开入口。
+- QOJ 题面通常是 PDF，当前优先尝试识别独立 PDF 链接；如果只拿到原题页或触发站点校验，就只保留原题打开入口。
 - Codeforces 可能受到 Cloudflare 或网络环境影响，爬取失败时会保留原题链接和占位题面。
-- 当前项目默认是单用户模型，后端使用固定用户 ID。
 - 站内不提供代码提交和在线判题，提交统一回到原题网站完成。
 - Python 爬虫依赖本机 Python 环境，部署时需要安装 `backend/scripts/requirements.txt`。
+
+## 数据查看
+
+如果你想直接查看数据，核心都在 MySQL 数据库 `algoforge` 里。
+
+常用表：
+
+- `users`
+- `problem_lists`
+- `problem_list_items`
+- `problems`
+- `review_states`
+- `notes`
+- `review_feedback_records`
+- `judge_submissions`
+
+Windows 下可以用 Navicat 连接本地 MySQL：
+
+```text
+Host: 127.0.0.1
+Port: 3306
+User: algoforge
+Password: algoforge
+Database: algoforge
+```
+
+如果你已经安装了 MySQL 命令行客户端，也可以手动初始化：
+
+```powershell
+$mysql = "C:\Program Files\MySQL\MySQL Server 9.2\bin\mysql.exe"
+& $mysql --default-character-set=utf8mb4 -uroot -proot -e "source D:/C_study/Algo/backend/data/db_schema.sql"
+& $mysql --default-character-set=utf8mb4 -uroot -proot algoforge -e "source D:/C_study/Algo/backend/data/db_seed.sql"
+& $mysql --default-character-set=utf8mb4 -uroot -proot algoforge -e "source D:/C_study/Algo/backend/data/migration_user_password_hash.sql"
+```
 
 ## 项目定位
 

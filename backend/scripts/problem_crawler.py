@@ -409,15 +409,17 @@ def scrape_atcoder(url):
     )
 
 
-def qoj_placeholder(url, title=None, statement_url=None, reason=None):
+def qoj_placeholder(url, title=None, pdf_url=None, reason=None):
     problem_id = url.rstrip("/").split("/")[-1] or "Problem"
-    access_url = statement_url or url
     reason_text = f"\n\n> {reason}" if reason else ""
+    markers = f"ALGOFORGE_QOJ_STATEMENT: {url}\n"
+    if pdf_url:
+        markers += f"ALGOFORGE_QOJ_PDF: {pdf_url}\n"
     content = (
-        f"ALGOFORGE_QOJ_STATEMENT: {access_url}\n\n"
+        f"{markers}\n"
         "## QOJ PDF 题面\n\n"
         "QOJ 的题面通常以内嵌 PDF 展示，样例、输入格式和输出格式都在同一份 PDF 中。"
-        "为避免浏览器自动下载或触发站点校验，这里不直接内嵌 PDF，请点击“打开题面”到原站查看。"
+        "若已识别到独立 PDF 链接，可在刷题页预览；提交仍请跳转到 QOJ 原题页面完成。"
         f"{reason_text}"
     )
     return ok(
@@ -464,7 +466,7 @@ def scrape_qoj(url):
                 pdf_url = urljoin(url, href)
                 break
 
-    return qoj_placeholder(url, title=title, statement_url=pdf_url or url)
+    return qoj_placeholder(url, title=title, pdf_url=pdf_url or None)
 
 
 def luogu_title_from_soup(soup):

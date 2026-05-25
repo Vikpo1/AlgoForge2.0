@@ -1,6 +1,6 @@
 <template>
   <div class="app-shell">
-    <header class="app-header">
+    <header v-if="$route.path !== '/login'" class="app-header">
       <div class="brand">
         <strong>AlgoForge</strong>
         <span>智能算法复习平台</span>
@@ -16,7 +16,13 @@
         <el-menu-item index="/">主菜单</el-menu-item>
         <el-menu-item index="/lists">题单管理</el-menu-item>
         <el-menu-item index="/review">刷题</el-menu-item>
+        <el-menu-item index="/stats">统计</el-menu-item>
       </el-menu>
+
+      <div class="account">
+        <span>{{ user?.username || '未登录' }}</span>
+        <el-button size="small" plain @click="logout">退出</el-button>
+      </div>
     </header>
 
     <RouterView />
@@ -24,7 +30,29 @@
 </template>
 
 <script setup>
-import { RouterView } from 'vue-router'
+import { onMounted, onUnmounted, ref } from 'vue'
+import { RouterView, useRouter } from 'vue-router'
+import { clearAuthSession, getAuthUser } from './utils/auth'
+
+const router = useRouter()
+const user = ref(getAuthUser())
+
+const syncUser = () => {
+  user.value = getAuthUser()
+}
+
+const logout = () => {
+  clearAuthSession()
+  router.push('/login')
+}
+
+onMounted(() => {
+  window.addEventListener('algoforge-auth-changed', syncUser)
+})
+
+onUnmounted(() => {
+  window.removeEventListener('algoforge-auth-changed', syncUser)
+})
 </script>
 
 <style>
@@ -78,5 +106,21 @@ body {
   flex: 1;
   justify-content: flex-end;
   border-bottom: none;
+}
+
+.account {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  color: #606266;
+  white-space: nowrap;
+}
+
+@media (max-width: 860px) {
+  .app-header {
+    height: auto;
+    flex-wrap: wrap;
+    padding: 12px 16px;
+  }
 }
 </style>

@@ -31,12 +31,37 @@ struct MysqlConnectionStatus {
     std::string database;
 };
 
+struct AuthUser {
+    int id = 0;
+    std::string username;
+    std::string email;
+};
+
+struct DailyActivity {
+    std::string date;
+    int count = 0;
+};
+
 class MysqlReviewRepository {
 public:
     static MysqlConfig loadConfigFromEnv();
     static MysqlConnectionStatus testConnection();
 
     static bool isAvailable();
+    static void setCurrentUserId(int userId);
+    static int currentUserId();
+
+    static std::optional<AuthUser> createUser(
+        const std::string& username,
+        const std::string& password,
+        const std::string& email
+    );
+    static std::optional<AuthUser> authenticateUser(
+        const std::string& username,
+        const std::string& password
+    );
+    static std::optional<AuthUser> findUserById(int userId);
+    static std::vector<DailyActivity> dailyActivity(int days);
 
     static ReviewPool loadReviewPool();
 
@@ -74,6 +99,13 @@ public:
     );
     static bool updateProblemWeight(int problemId, int problemUserWeight);
     static bool updateReviewState(int problemId, const domain::ReviewState& reviewState);
+    static bool recordReviewFeedback(
+        int problemId,
+        const std::string& feedback,
+        int durationSeconds,
+        const std::string& previousStatus,
+        const std::string& nextStatus
+    );
     static bool recordJudgeSubmission(
         int problemId,
         const std::string& language,

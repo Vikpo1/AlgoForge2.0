@@ -5,9 +5,11 @@
 
 #include <cstdlib>
 #include <exception>
+#include <functional>
 #include <iostream>
 #include <sstream>
 #include <string>
+#include <thread>
 #include <utility>
 #include <vector>
 
@@ -23,6 +25,8 @@ namespace repository {
 namespace {
 
 constexpr int kDefaultUserId = 1;
+
+thread_local int gCurrentUserId = kDefaultUserId;
 
 std::string getEnvOrDefault(const char* name, const std::string& defaultValue) {
     const char* value = std::getenv(name);
@@ -168,6 +172,29 @@ std::string escape(MYSQL* connection, const std::string& value) {
     );
     result.resize(length);
     return result;
+}
+
+std::string passwordHash(const std::string& password) {
+    return std::to_string(std::hash<std::string>{}("algoforge:" + password));
+}
+
+bool ensurePasswordHashColumn(MYSQL* connection) {
+    if (mysql_query(connection, "SHOW COLUMNS FROM users LIKE 'password_hash'") != 0) {
+        return false;
+    }
+
+    MYSQL_RES* result = mysql_store_result(connection);
+    if (result == nullptr) {
+        return false;
+    }
+
+    const bool exists = mysql_fetch_row(result) != nullptr;
+    mysql_free_result(result);
+    if (exists) {
+        return true;
+    }
+
+    return mysql_query(connection, "ALTER TABLE users ADD COLUMN password_hash VARCHAR(255) NULL AFTER email") == 0;
 }
 
 std::string limitUtf8Bytes(const std::string& value, std::size_t maxBytes) {
@@ -339,8 +366,9 @@ std::string candidateSelectSql(const std::string& whereClause) {
         << "COALESCE(p.sample_output, ''), "
         << "rs.problem_id, rs.status, rs.problem_user_weight, rs.review_count, rs.last_feedback "
         << "FROM problem_list_items pli "
+        << "JOIN problem_lists pl ON pl.id = pli.list_id AND pl.user_id = " << gCurrentUserId << " "
         << "JOIN problems p ON p.id = pli.problem_id "
-        << "JOIN review_states rs ON rs.problem_id = p.id AND rs.user_id = " << kDefaultUserId << " "
+        << "JOIN review_states rs ON rs.problem_id = p.id AND rs.user_id = " << gCurrentUserId << " "
         << whereClause
         << " ORDER BY p.id";
     return sql.str();
@@ -402,11 +430,11 @@ domain::Problem buildImportedProblem(int problemId, const std::string& url) {
         return problem;
     }
 
-    domain::Problem problem(problemId, "导入题目", "Imported", url, "Medium");
-    problem.setTags({"基础"});
-    problem.setStatementMarkdown("## 题面\n\n这是从原题链接导入的本地记录。");
-    problem.setInputDescription("输入格式待补充。");
-    problem.setOutputDescription("输出格式待补充。");
+    domain::Problem problem(problemId, "Imported Problem", "Imported", url, "Medium");
+    problem.setTags({"Imported"});
+    problem.setStatementMarkdown("## Statement\n\nImported from original problem URL.");
+    problem.setInputDescription("Input format is pending.");
+    problem.setOutputDescription("Output format is pending.");
     return problem;
 }
 
@@ -417,9 +445,9 @@ bool looksLikeFailedCrawlStatement(const std::string& statement) {
         statement.find("backend was built without HTTPS/OpenSSL support") != std::string::npos ||
         statement.find("invalid URL") != std::string::npos ||
         statement.find("unsupported OJ") != std::string::npos ||
-        statement.find("题面爬取失败") != std::string::npos ||
-        statement.find("é¢˜é¢ç¬åå¤±è´¥") != std::string::npos ||
-        statement.find("棰橀潰鐖") != std::string::npos;
+        statement.find("棰橀潰鐖彇澶辫触") != std::string::npos ||
+        statement.find("茅垄藴茅聺垄莽聢卢氓聫聳氓陇卤猫麓楼") != std::string::npos ||
+        statement.find("妫版﹢娼伴悥") != std::string::npos;
 }
 
 bool hasUsefulStoredStatement(const std::string& statement) {
@@ -523,6 +551,185 @@ bool MysqlReviewRepository::isAvailable() {
     return status.enabled && status.connected;
 }
 
+void MysqlReviewRepository::setCurrentUserId(int userId) {
+    gCurrentUserId = userId > 0 ? userId : kDefaultUserId;
+}
+
+int MysqlReviewRepository::currentUserId() {
+    return gCurrentUserId;
+}
+
+std::optional<AuthUser> MysqlReviewRepository::findUserById(int userId) {
+#ifndef ALGOFORGE_USE_MYSQL
+    return std::nullopt;
+#else
+    MysqlConnection connection;
+    if (!connection.ok()) {
+        return std::nullopt;
+    }
+    ensurePasswordHashColumn(connection.get());
+
+    std::ostringstream sql;
+    sql << "SELECT id, username, COALESCE(email, '') FROM users WHERE id = " << userId << " LIMIT 1";
+    if (mysql_query(connection.get(), sql.str().c_str()) != 0) {
+        return std::nullopt;
+    }
+
+    MYSQL_RES* result = mysql_store_result(connection.get());
+    if (result == nullptr) {
+        return std::nullopt;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(result);
+    if (row == nullptr) {
+        mysql_free_result(result);
+        return std::nullopt;
+    }
+
+    AuthUser user;
+    user.id = std::atoi(row[0]);
+    user.username = row[1] ? row[1] : "";
+    user.email = row[2] ? row[2] : "";
+    mysql_free_result(result);
+    return user;
+#endif
+}
+
+std::optional<AuthUser> MysqlReviewRepository::createUser(
+    const std::string& username,
+    const std::string& password,
+    const std::string& email
+) {
+#ifndef ALGOFORGE_USE_MYSQL
+    return std::nullopt;
+#else
+    MysqlConnection connection;
+    if (!connection.ok()) {
+        return std::nullopt;
+    }
+    ensurePasswordHashColumn(connection.get());
+
+    const std::string escapedUsername = escape(connection.get(), username);
+    const std::string escapedPasswordHash = escape(connection.get(), passwordHash(password));
+    const std::string escapedEmail = escape(connection.get(), email);
+
+    std::ostringstream sql;
+    sql << "INSERT INTO users (username, email, password_hash) VALUES ('"
+        << escapedUsername << "', ";
+    if (email.empty()) {
+        sql << "NULL";
+    } else {
+        sql << "'" << escapedEmail << "'";
+    }
+    sql << ", '" << escapedPasswordHash << "')";
+
+    if (!executeSql(connection.get(), sql.str())) {
+        return std::nullopt;
+    }
+
+    return findUserById(static_cast<int>(mysql_insert_id(connection.get())));
+#endif
+}
+
+std::optional<AuthUser> MysqlReviewRepository::authenticateUser(
+    const std::string& username,
+    const std::string& password
+) {
+#ifndef ALGOFORGE_USE_MYSQL
+    return std::nullopt;
+#else
+    MysqlConnection connection;
+    if (!connection.ok()) {
+        return std::nullopt;
+    }
+    ensurePasswordHashColumn(connection.get());
+
+    const std::string escapedUsername = escape(connection.get(), username);
+    const std::string escapedHash = escape(connection.get(), passwordHash(password));
+    if (username == "local_user" && password == "algoforge") {
+        executeSql(
+            connection.get(),
+            "UPDATE users SET password_hash = '" + escapedHash +
+                "' WHERE username = 'local_user' AND (password_hash IS NULL OR password_hash = '')"
+        );
+    }
+
+    std::ostringstream sql;
+    sql << "SELECT id, username, COALESCE(email, '') FROM users WHERE username = '"
+        << escapedUsername
+        << "' AND password_hash = '"
+        << escapedHash
+        << "' LIMIT 1";
+
+    if (mysql_query(connection.get(), sql.str().c_str()) != 0) {
+        return std::nullopt;
+    }
+
+    MYSQL_RES* result = mysql_store_result(connection.get());
+    if (result == nullptr) {
+        return std::nullopt;
+    }
+
+    MYSQL_ROW row = mysql_fetch_row(result);
+    if (row == nullptr) {
+        mysql_free_result(result);
+        return std::nullopt;
+    }
+
+    AuthUser user;
+    user.id = std::atoi(row[0]);
+    user.username = row[1] ? row[1] : "";
+    user.email = row[2] ? row[2] : "";
+    mysql_free_result(result);
+    return user;
+#endif
+}
+
+std::vector<DailyActivity> MysqlReviewRepository::dailyActivity(int days) {
+#ifndef ALGOFORGE_USE_MYSQL
+    return {};
+#else
+    MysqlConnection connection;
+    if (!connection.ok()) {
+        return {};
+    }
+
+    if (days <= 0) {
+        days = 365;
+    }
+
+    std::ostringstream sql;
+    sql
+        << "SELECT DATE(created_at) AS day_key, COUNT(DISTINCT problem_id) "
+        << "FROM review_feedback_records "
+        << "WHERE user_id = " << currentUserId()
+        << " AND created_at >= DATE_SUB(CURDATE(), INTERVAL " << days << " DAY) "
+        << "GROUP BY DATE(created_at) "
+        << "ORDER BY day_key";
+
+    if (mysql_query(connection.get(), sql.str().c_str()) != 0) {
+        return {};
+    }
+
+    MYSQL_RES* result = mysql_store_result(connection.get());
+    if (result == nullptr) {
+        return {};
+    }
+
+    std::vector<DailyActivity> rows;
+    MYSQL_ROW row;
+    while ((row = mysql_fetch_row(result)) != nullptr) {
+        DailyActivity item;
+        item.date = row[0] ? row[0] : "";
+        item.count = row[1] ? std::atoi(row[1]) : 0;
+        rows.push_back(item);
+    }
+
+    mysql_free_result(result);
+    return rows;
+#endif
+}
+
 ReviewPool MysqlReviewRepository::loadReviewPool() {
 #ifndef ALGOFORGE_USE_MYSQL
     return {};
@@ -547,7 +754,7 @@ std::vector<domain::ProblemList> MysqlReviewRepository::listProblemLists() {
         "SELECT pl.id, pl.name, COALESCE(pl.description, ''), pl.list_user_weight, COUNT(pli.problem_id) "
         "FROM problem_lists pl "
         "LEFT JOIN problem_list_items pli ON pli.list_id = pl.id "
-        "WHERE pl.user_id = " + std::to_string(kDefaultUserId) + " "
+        "WHERE pl.user_id = " + std::to_string(currentUserId()) + " "
         "GROUP BY pl.id, pl.name, pl.description, pl.list_user_weight "
         "ORDER BY pl.id";
 
@@ -609,7 +816,7 @@ std::optional<domain::ProblemList> MysqlReviewRepository::createProblemList(
     std::ostringstream sql;
     sql
         << "INSERT INTO problem_lists (user_id, name, description, list_user_weight) VALUES ("
-        << kDefaultUserId << ", "
+        << currentUserId() << ", "
         << "'" << escape(connection.get(), name) << "', "
         << "'" << escape(connection.get(), description) << "', "
         << listUserWeight << ")";
@@ -660,7 +867,7 @@ std::optional<domain::ProblemList> MysqlReviewRepository::updateProblemList(
         }
         sql << assignments[i];
     }
-    sql << " WHERE id = " << listId << " AND user_id = " << kDefaultUserId;
+    sql << " WHERE id = " << listId << " AND user_id = " << currentUserId();
 
     if (!executeSql(connection.get(), sql.str())) {
         return std::nullopt;
@@ -684,11 +891,11 @@ bool MysqlReviewRepository::deleteProblemList(int listId) {
         "SELECT pli.problem_id FROM problem_list_items pli "
         "JOIN problem_lists pl ON pl.id = pli.list_id "
         "WHERE pli.list_id = " + std::to_string(listId) +
-            " AND pl.user_id = " + std::to_string(kDefaultUserId)
+            " AND pl.user_id = " + std::to_string(currentUserId())
     );
 
     std::ostringstream sql;
-    sql << "DELETE FROM problem_lists WHERE id = " << listId << " AND user_id = " << kDefaultUserId;
+    sql << "DELETE FROM problem_lists WHERE id = " << listId << " AND user_id = " << currentUserId();
     if (!executeSql(connection.get(), sql.str()) || mysql_affected_rows(connection.get()) <= 0) {
         return false;
     }
@@ -721,7 +928,7 @@ bool MysqlReviewRepository::removeProblemFromList(int listId, int problemId) {
         << "JOIN problem_lists pl ON pl.id = pli.list_id "
         << "WHERE pli.list_id = " << listId
         << " AND pli.problem_id = " << problemId
-        << " AND pl.user_id = " << kDefaultUserId;
+        << " AND pl.user_id = " << currentUserId();
 
     if (!executeSql(connection.get(), deleteItemSql.str()) || mysql_affected_rows(connection.get()) <= 0) {
         return false;
@@ -809,7 +1016,7 @@ std::optional<domain::Note> MysqlReviewRepository::findNoteByProblemId(int probl
     std::ostringstream sql;
     sql
         << "SELECT id, problem_id, COALESCE(hint_markdown, ''), COALESCE(note_markdown, '') "
-        << "FROM notes WHERE user_id = " << kDefaultUserId
+        << "FROM notes WHERE user_id = " << currentUserId()
         << " AND problem_id = " << problemId
         << " LIMIT 1";
 
@@ -861,7 +1068,7 @@ std::optional<domain::Note> MysqlReviewRepository::updateNote(
     std::ostringstream sql;
     sql
         << "INSERT INTO notes (user_id, problem_id, hint_markdown, note_markdown) VALUES ("
-        << kDefaultUserId << ", "
+        << currentUserId() << ", "
         << problemId << ", "
         << "'" << escape(connection.get(), hintMarkdown) << "', "
         << "'" << escape(connection.get(), noteMarkdown) << "') "
@@ -928,15 +1135,15 @@ std::optional<domain::ReviewCandidate> MysqlReviewRepository::importProblemToLis
     executeSql(
         connection.get(),
         "INSERT IGNORE INTO review_states (user_id, problem_id, status, problem_user_weight, review_count, last_feedback) VALUES (" +
-            std::to_string(kDefaultUserId) + ", " + std::to_string(problemId) + ", 'FIRST_FIX', 1, 0, 'FAILED')"
+            std::to_string(currentUserId()) + ", " + std::to_string(problemId) + ", 'FIRST_FIX', 1, 0, 'FAILED')"
     );
 
-    std::string hint = "这是从链接 `" + url + "` 导入的模拟提示。";
-    std::string note = "### 导入复盘\n\n该题目前由数据库仓库记录，后续可替换为真实 OJ 抓取结果。";
+    std::string hint = "Imported from `" + url + "`.";
+    std::string note = "### Imported Review\n\nThis problem is stored in the database and can be refreshed from the original OJ.";
     executeSql(
         connection.get(),
         "INSERT INTO notes (user_id, problem_id, hint_markdown, note_markdown) VALUES (" +
-            std::to_string(kDefaultUserId) + ", " + std::to_string(problemId) + ", '" +
+            std::to_string(currentUserId()) + ", " + std::to_string(problemId) + ", '" +
             escape(connection.get(), hint) + "', '" + escape(connection.get(), note) + "') " +
             "ON DUPLICATE KEY UPDATE hint_markdown = VALUES(hint_markdown), note_markdown = VALUES(note_markdown)"
     );
@@ -957,7 +1164,7 @@ bool MysqlReviewRepository::updateProblemWeight(int problemId, int problemUserWe
     std::ostringstream sql;
     sql
         << "UPDATE review_states SET problem_user_weight = " << problemUserWeight
-        << " WHERE user_id = " << kDefaultUserId
+        << " WHERE user_id = " << currentUserId()
         << " AND problem_id = " << problemId;
 
     return executeSql(connection.get(), sql.str()) && mysql_affected_rows(connection.get()) > 0;
@@ -983,10 +1190,40 @@ bool MysqlReviewRepository::updateReviewState(int problemId, const domain::Revie
         << "next_review_at = DATE_ADD(NOW(), INTERVAL "
         << reviewDelayHours(reviewState.getLastFeedback()) << " HOUR), "
         << "last_reviewed_at = NOW() "
-        << "WHERE user_id = " << kDefaultUserId
+        << "WHERE user_id = " << currentUserId()
         << " AND problem_id = " << problemId;
 
     return executeSql(connection.get(), sql.str()) && mysql_affected_rows(connection.get()) > 0;
+#endif
+}
+
+bool MysqlReviewRepository::recordReviewFeedback(
+    int problemId,
+    const std::string& feedback,
+    int durationSeconds,
+    const std::string& previousStatus,
+    const std::string& nextStatus
+) {
+#ifndef ALGOFORGE_USE_MYSQL
+    return false;
+#else
+    MysqlConnection connection;
+    if (!connection.ok()) {
+        return false;
+    }
+
+    std::ostringstream sql;
+    sql
+        << "INSERT INTO review_feedback_records "
+        << "(user_id, problem_id, feedback, duration_seconds, previous_status, next_status) VALUES ("
+        << currentUserId() << ", "
+        << problemId << ", "
+        << "'" << escape(connection.get(), feedback) << "', "
+        << durationSeconds << ", "
+        << "'" << escape(connection.get(), previousStatus) << "', "
+        << "'" << escape(connection.get(), nextStatus) << "')";
+
+    return executeSql(connection.get(), sql.str());
 #endif
 }
 
@@ -1030,7 +1267,7 @@ bool MysqlReviewRepository::recordJudgeSubmission(
             << "INSERT INTO judge_submissions "
             << "(user_id, problem_id, language, code, verdict, runtime_ms, memory_kb, message, "
             << "remote_judge, remote_submission_id, remote_submission_url) VALUES ("
-            << kDefaultUserId << ", "
+            << currentUserId() << ", "
             << problemId << ", "
             << "'" << escape(connection.get(), language) << "', "
             << "'" << escape(connection.get(), code) << "', "
@@ -1049,7 +1286,7 @@ bool MysqlReviewRepository::recordJudgeSubmission(
     legacySql
         << "INSERT INTO judge_submissions "
         << "(user_id, problem_id, language, code, verdict, runtime_ms, memory_kb, message) VALUES ("
-        << kDefaultUserId << ", "
+        << currentUserId() << ", "
         << problemId << ", "
         << "'" << escape(connection.get(), language) << "', "
         << "'" << escape(connection.get(), code) << "', "

@@ -1,5 +1,5 @@
 <template>
-  <section class="problem-section" :class="{ 'contest-problem': isContestStyledProblem }">
+  <section class="problem-section" :class="{ 'contest-problem': isContestStyledProblem, 'qoj-problem': isQojProblem }">
     <div class="problem-title-row">
       <div>
         <h2>{{ problem.title }}</h2>
@@ -24,19 +24,41 @@
     </div>
 
     <div class="statement" :class="{ 'statement-contest': isContestStyledProblem }">
-      <div v-if="qojStatementUrl" class="qoj-statement">
-        <div>
+      <div v-if="isQojProblem" class="qoj-statement">
+        <div class="qoj-statement-content">
           <strong>QOJ PDF 题面</strong>
-          <span>
-            QOJ 的样例、输入格式和输出格式通常都在 PDF 中。为避免页面自动下载，这里只提供打开入口。
+          <span v-if="qojPdfUrl">
+            样例、输入格式和输出格式通常都在 PDF 中。默认不加载，点击后在当前页面预览。
+          </span>
+          <span v-else>
+            当前未识别到可直接预览的 PDF，请打开原题页面查看题面。
           </span>
         </div>
-        <el-button type="primary" plain size="small" @click="openQojStatement">
-          打开题面
-        </el-button>
+        <div class="qoj-actions">
+          <el-button v-if="qojPdfUrl" type="primary" plain size="small" @click="showQojPdf = !showQojPdf">
+            {{ showQojPdf ? '隐藏题面预览' : '预览 PDF 题面' }}
+          </el-button>
+          <el-button plain size="small" @click="openQojStatement">
+            打开原题
+          </el-button>
+        </div>
       </div>
 
-      <MarkdownViewer :content="visibleStatementMarkdown" />
+      <div v-if="isQojProblem && qojPdfUrl && showQojPdf" class="qoj-pdf-frame">
+        <iframe
+          :src="qojPdfPreviewUrl"
+          title="QOJ PDF Statement"
+        ></iframe>
+        <p>
+          若浏览器仍显示工具栏或拦截预览，请点击“打开原题”到 QOJ 查看并提交。
+        </p>
+      </div>
+
+      <div v-else-if="isQojProblem && !qojPdfUrl" class="qoj-no-preview">
+        QOJ 返回了站点校验或原题页面，AlgoForge 不会把整个 QOJ 页面嵌入当前页。请点击“打开原题”查看题面。
+      </div>
+
+      <MarkdownViewer v-if="shouldRenderStatementMarkdown" :content="visibleStatementMarkdown" />
     </div>
 
     <template v-if="!isContestStyledProblem">
@@ -95,7 +117,7 @@
 </template>
 
 <script setup>
-import { computed } from 'vue'
+import { computed, ref, watch } from 'vue'
 import MarkdownViewer from '../MarkdownViewer.vue'
 
 const props = defineProps({
@@ -119,13 +141,60 @@ const props = defineProps({
 
 defineEmits(['finish-thinking', 'toggle-debug', 'toggle-tags'])
 
-const isContestStyledProblem = computed(() => ['Codeforces', 'AtCoder'].includes(props.problem?.oj))
+const showQojPdf = ref(false)
+
+const isQojProblem = computed(() => props.problem?.oj === 'QOJ')
+const isContestStyledProblem = computed(() => ['Codeforces', 'AtCoder', 'QOJ'].includes(props.problem?.oj))
 const statementText = computed(() => props.problem?.statementMarkdown || '暂无题面。')
 
-const qojStatementUrl = computed(() => {
-  const match = statementText.value.match(/^ALGOFORGE_(?:QOJ|PDF)_STATEMENT:\s*(\S+)/m)
-  return match ? match[1] : ''
+const markerValue = (patterns) => {
+  for (const pattern of patterns) {
+    const match = statementText.value.match(pattern)
+    if (match?.[1]) {
+      return match[1]
+    }
+  }
+  return ''
+}
+
+const isPdfLikeUrl = (url) => /(?:\.pdf(?:[?#]|$)|download\.php)/i.test(url || '')
+
+const qojOriginalUrl = computed(() => {
+  const marked = markerValue([
+    /^ALGOFORGE_QOJ_STATEMENT:\s*(\S+)/m,
+    /^ALGOFORGE_QOJ_ORIGIN:\s*(\S+)/m
+  ])
+  if (marked && !isPdfLikeUrl(marked)) {
+    return marked
+  }
+  return props.problem?.url || marked || ''
 })
+
+const qojPdfUrl = computed(() => {
+  const direct = markerValue([
+    /^ALGOFORGE_QOJ_PDF:\s*(\S+)/m,
+    /^ALGOFORGE_QOJ_PDF_URL:\s*(\S+)/m
+  ])
+  if (direct) {
+    return direct
+  }
+
+  const legacy = markerValue([
+    /^ALGOFORGE_(?:QOJ|PDF)_STATEMENT:\s*(\S+)/m
+  ])
+  return isPdfLikeUrl(legacy) ? legacy : ''
+})
+
+const withPdfViewerParams = (url) => {
+  if (!url) {
+    return ''
+  }
+  const params = 'toolbar=0&navpanes=0&scrollbar=0&page=1&view=FitH'
+  const [base, hash = ''] = url.split('#')
+  return `${base}#${hash ? `${hash}&${params}` : params}`
+}
+
+const qojPdfPreviewUrl = computed(() => withPdfViewerParams(qojPdfUrl.value))
 
 const contestLimits = computed(() => {
   const match = statementText.value.match(
@@ -142,7 +211,8 @@ const contestLimits = computed(() => {
 
 const visibleStatementMarkdown = computed(() => {
   let markdown = statementText.value
-    .replace(/^ALGOFORGE_(?:QOJ|PDF)_STATEMENT:\s*\S+\s*/m, '')
+    .replace(/^ALGOFORGE_(?:QOJ|PDF)_STATEMENT:\s*\S+\s*/gm, '')
+    .replace(/^ALGOFORGE_QOJ_(?:PDF|PDF_URL|ORIGIN):\s*\S+\s*/gm, '')
     .replace(/^ALGOFORGE_(?:CF|ATCODER)_LIMITS\s*\n[\s\S]*?\nALGOFORGE_(?:CF|ATCODER)_BODY\s*/m, '')
     .trim()
 
@@ -153,8 +223,15 @@ const visibleStatementMarkdown = computed(() => {
   return markdown
 })
 
+const shouldRenderStatementMarkdown = computed(() => {
+  if (!visibleStatementMarkdown.value) {
+    return false
+  }
+  return !isQojProblem.value
+})
+
 const openQojStatement = () => {
-  const target = qojStatementUrl.value || props.problem?.url
+  const target = qojOriginalUrl.value || props.problem?.url
   if (target) {
     window.open(target, '_blank', 'noopener,noreferrer')
   }
@@ -165,6 +242,13 @@ const openOriginalProblem = () => {
     window.open(props.problem.url, '_blank', 'noopener,noreferrer')
   }
 }
+
+watch(
+  () => props.problem?.id,
+  () => {
+    showQojPdf.value = false
+  }
+)
 </script>
 
 <style scoped>
@@ -298,21 +382,64 @@ const openOriginalProblem = () => {
   justify-content: space-between;
   gap: 16px;
   margin-bottom: 18px;
-  padding: 14px 16px;
-  border: 1px solid #dcdfe6;
-  border-radius: 8px;
-  background: #f8fafc;
+  padding: 10px 0 16px;
+  border-bottom: 1px solid #e5e7eb;
+  border-radius: 0;
+  background: transparent;
 }
 
-.qoj-statement div {
+.qoj-statement-content {
   display: flex;
   flex-direction: column;
   gap: 4px;
+  min-width: 0;
+}
+
+.qoj-actions {
+  display: flex;
+  flex-direction: row;
+  align-items: center;
+  gap: 8px;
 }
 
 .qoj-statement span {
   color: #606266;
   font-size: 13px;
+}
+
+.qoj-pdf-frame {
+  margin: 0 0 24px;
+  overflow: hidden;
+  border: 1px solid #d9d9d9;
+  border-radius: 0;
+  background: #ffffff;
+  box-shadow: 0 1px 2px rgba(0, 0, 0, 0.04);
+}
+
+.qoj-pdf-frame iframe {
+  display: block;
+  width: 100%;
+  height: min(78vh, 860px);
+  border: 0;
+  background: #f5f7fa;
+}
+
+.qoj-pdf-frame p {
+  margin: 0;
+  padding: 10px 12px;
+  color: #606266;
+  font-size: 13px;
+  border-top: 1px solid #ebeef5;
+  background: #f8fafc;
+}
+
+.qoj-no-preview {
+  margin: 0 0 18px;
+  padding: 12px 14px;
+  color: #606266;
+  font-size: 13px;
+  background: #f8fafc;
+  border: 1px solid #e5e7eb;
 }
 
 .samples {
