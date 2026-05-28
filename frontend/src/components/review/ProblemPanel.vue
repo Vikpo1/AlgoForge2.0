@@ -17,10 +17,10 @@
     </div>
 
     <div v-if="showTags" class="tag-row">
-      <el-tag v-for="tag in problem.tags || []" :key="tag" effect="plain">
+      <el-tag v-for="tag in displayTags" :key="tag" effect="plain">
         {{ tag }}
       </el-tag>
-      <span v-if="!problem.tags?.length" class="muted">暂无标签</span>
+      <span v-if="!displayTags.length" class="muted">暂无标签</span>
     </div>
 
     <div class="statement" :class="{ 'statement-contest': isContestStyledProblem }">
@@ -146,6 +146,24 @@ const showQojPdf = ref(false)
 const isQojProblem = computed(() => props.problem?.oj === 'QOJ')
 const isContestStyledProblem = computed(() => ['Codeforces', 'AtCoder', 'QOJ'].includes(props.problem?.oj))
 const statementText = computed(() => props.problem?.statementMarkdown || '暂无题面。')
+const displayTags = computed(() => {
+  const oj = String(props.problem?.oj || '').trim()
+  const ojKey = oj.toLowerCase()
+  const seen = new Set()
+  const realTags = (props.problem?.tags || [])
+    .map(tag => String(tag || '').trim())
+    .filter(Boolean)
+    .filter(tag => tag.toLowerCase() !== ojKey)
+    .filter((tag) => {
+      const key = tag.toLowerCase()
+      if (seen.has(key)) {
+        return false
+      }
+      seen.add(key)
+      return true
+    })
+  return realTags.length ? realTags : (oj ? [oj] : [])
+})
 
 const markerValue = (patterns) => {
   for (const pattern of patterns) {

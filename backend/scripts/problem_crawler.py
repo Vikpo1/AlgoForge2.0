@@ -1,7 +1,7 @@
 import json
 import re
 import sys
-from urllib.parse import urljoin
+from urllib.parse import urljoin, urlparse
 
 
 IMPORT_ERROR = None
@@ -51,11 +51,155 @@ def ok(url, title, platform, content, content_format="markdown", tags=None, **ex
         "platform": platform,
         "content": content or "",
         "content_format": content_format,
-        "tags": tags or [platform],
+        "tags": normalize_tags(tags, platform),
         "url": url,
     }
     payload.update(extra)
     return payload
+
+
+def normalize_tags(tags, platform=None):
+    platform_name = (platform or "").strip().lower()
+    cleaned = []
+    seen = set()
+    for raw in tags or []:
+        tag = normalize_space(str(raw))
+        if not tag:
+            continue
+        if tag.lower() == platform_name:
+            continue
+        if re.fullmatch(r"\*?\d+", tag):
+            continue
+        key = tag.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        cleaned.append(tag)
+    return cleaned
+
+
+def extract_codeforces_tags(soup):
+    tags = []
+    for tag in soup.select("span.tag-box"):
+        text = tag.get_text(" ", strip=True)
+        text = normalize_space(text)
+        if text:
+            tags.append(text)
+    return normalize_tags(tags, "Codeforces")
+
+
+def codeforces_problem_key(url):
+    path = urlparse(url).path
+    match = re.search(r"/(?:contest|problemset/problem|gym)/(\d+)/(?:problem/)?([A-Za-z][A-Za-z0-9]*)", path)
+    if not match:
+        match = re.search(r"/problemset/problem/(\d+)/([A-Za-z][A-Za-z0-9]*)", path)
+    if not match:
+        return None, None
+    return int(match.group(1)), match.group(2)
+
+
+def extract_codeforces_api_tags(url):
+    contest_id, index = codeforces_problem_key(url)
+    if not contest_id or not index:
+        return []
+
+    try:
+        api_url = "https://codeforces.com/api/problemset.problems"
+        headers = make_headers("https://codeforces.com/")
+        if cloudscraper is not None:
+            scraper = cloudscraper.create_scraper(
+                browser={"browser": "chrome", "platform": "windows", "mobile": False}
+            )
+            response = scraper.get(api_url, headers=headers, timeout=15)
+        else:
+            response = requests.get(api_url, headers=headers, timeout=15)
+        response.raise_for_status()
+        payload = response.json()
+    except Exception:
+        return []
+
+    if payload.get("status") != "OK":
+        return []
+
+    for item in payload.get("result", {}).get("problems", []):
+        if item.get("contestId") == contest_id and str(item.get("index", "")) == index:
+            return normalize_tags(item.get("tags", []), "Codeforces")
+    return []
+
+
+def flatten_luogu_tags(value):
+    tags = []
+    if isinstance(value, str):
+        if value.strip():
+            tags.append(value.strip())
+    elif isinstance(value, dict):
+        for key in ("name", "title", "label", "tag", "value"):
+            item = value.get(key)
+            if isinstance(item, str) and item.strip():
+                tags.append(item.strip())
+        for key in ("tags", "tagList", "keywords", "categories"):
+            if key in value:
+                tags.extend(flatten_luogu_tags(value[key]))
+    elif isinstance(value, list):
+        for item in value:
+            tags.extend(flatten_luogu_tags(item))
+    return tags
+
+
+def extract_luogu_tags(problem_data):
+    tags = []
+    luogu_tag_ids = problem_data.get("tags", [])
+    if isinstance(luogu_tag_ids, list) and luogu_tag_ids:
+        resolved = resolve_luogu_tag_names(luogu_tag_ids)
+        if resolved:
+            tags.extend(resolved)
+
+    for key in ("tags", "tagList", "keywords", "categories"):
+        if key in problem_data:
+            tags.extend(flatten_luogu_tags(problem_data[key]))
+    return normalize_tags(tags, "Luogu")
+
+
+def resolve_luogu_tag_names(tag_ids):
+    normalized_ids = []
+    for tag_id in tag_ids or []:
+        if isinstance(tag_id, int):
+            normalized_ids.append(tag_id)
+        elif isinstance(tag_id, str) and tag_id.strip().isdigit():
+            normalized_ids.append(int(tag_id.strip()))
+
+    if not normalized_ids:
+        return []
+
+    try:
+        response = requests.get(
+            "https://www.luogu.com.cn/_lfe/tags",
+            headers=make_headers("https://www.luogu.com.cn/"),
+            timeout=8,
+        )
+        response.raise_for_status()
+        tag_payload = response.json()
+    except Exception:
+        return []
+
+    tag_map = {}
+    for item in tag_payload.get("tags", []):
+        tag_id = item.get("id")
+        name = item.get("name")
+        if isinstance(tag_id, int) and isinstance(name, str) and name.strip():
+            tag_map[tag_id] = name.strip()
+
+    return [tag_map[tag_id] for tag_id in normalized_ids if tag_id in tag_map]
+
+
+def extract_qoj_tags(soup):
+    tags = []
+    for selector in (".tag", ".tags a", ".badge", "a[href*='tag']", "a[href*='category']"):
+        for node in soup.select(selector):
+            text = node.get_text(" ", strip=True)
+            if text:
+                tags.append(text)
+    return normalize_tags(tags, "QOJ")
 
 
 def fail(url, error, platform=None):
@@ -313,7 +457,7 @@ def scrape_codeforces(url):
     input_block = statement.find("div", class_="input-specification")
     output_block = statement.find("div", class_="output-specification")
     samples = statement.find_all("pre")
-    tags = [tag.get_text(strip=True) for tag in soup.find_all("span", class_="tag-box")]
+    tags = extract_codeforces_tags(soup) or extract_codeforces_api_tags(url)
 
     parts = []
     for child in statement.children:
@@ -351,7 +495,7 @@ def scrape_codeforces(url):
         "Codeforces",
         content,
         "markdown",
-        tags or ["Codeforces"],
+        tags,
         input_description=text_or_empty(input_block),
         output_description=text_or_empty(output_block),
         sample_input=text_or_empty(samples[0]) if len(samples) >= 2 else "",
@@ -401,7 +545,7 @@ def scrape_atcoder(url):
         "AtCoder",
         content,
         "markdown",
-        ["AtCoder"],
+        [],
         input_description=section_markdown_after_heading(statement, ["Input", "入力"]),
         output_description=section_markdown_after_heading(statement, ["Output", "出力"]),
         sample_input=sample_input,
@@ -428,7 +572,7 @@ def qoj_placeholder(url, title=None, pdf_url=None, reason=None):
         "QOJ",
         content,
         "markdown",
-        ["QOJ"],
+        [],
         input_description="QOJ 题面为 PDF，请在原题页面查看输入格式。",
         output_description="QOJ 题面为 PDF，请在原题页面查看输出格式。",
         sample_input="样例在 QOJ PDF 题面中。",
@@ -466,7 +610,10 @@ def scrape_qoj(url):
                 pdf_url = urljoin(url, href)
                 break
 
-    return qoj_placeholder(url, title=title, pdf_url=pdf_url or None)
+    tags = extract_qoj_tags(soup)
+    result = qoj_placeholder(url, title=title, pdf_url=pdf_url or None)
+    result["tags"] = tags
+    return result
 
 
 def luogu_title_from_soup(soup):
@@ -512,7 +659,7 @@ def scrape_luogu(url):
             "Luogu",
             markdown.strip(),
             "markdown",
-            ["Luogu"],
+            extract_luogu_tags(data),
             input_description=content.get("formatI", ""),
             output_description=content.get("formatO", ""),
             sample_input=sample_input,
@@ -523,7 +670,7 @@ def scrape_luogu(url):
     if not article:
         raise RuntimeError("Luogu lentille-context and article were not found")
 
-    return ok(url, title, "Luogu", html_to_markdown(article), "markdown", ["Luogu"])
+    return ok(url, title, "Luogu", html_to_markdown(article), "markdown", [])
 
 
 def scrape_problem(url):
